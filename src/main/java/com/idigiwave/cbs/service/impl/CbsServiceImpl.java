@@ -45,7 +45,12 @@ public class CbsServiceImpl implements CbsService {
         log.info("CBS: Creating customer for email={}", request.getEmail());
 
         if (customerRepository.existsByEmail(request.getEmail())) {
-            throw new CbsDuplicateResourceException("Customer with email already exists in CBS: " + request.getEmail());
+            CbsCustomer existing = customerRepository.findByEmail(request.getEmail())
+                    .orElseThrow(() -> new CbsDuplicateResourceException(
+                            "Customer with email already exists in CBS: " + request.getEmail()));
+            log.info("CBS: Customer already exists for email={}, returning customerId={}",
+                    request.getEmail(), existing.getCustomerId());
+            return mapToCustomerResponse(existing);
         }
         if (request.getAadhaarNumber() != null &&
                 customerRepository.existsByAadhaarNumber(request.getAadhaarNumber())) {
