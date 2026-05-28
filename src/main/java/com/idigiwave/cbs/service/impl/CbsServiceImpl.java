@@ -12,6 +12,7 @@ import com.idigiwave.cbs.repository.*;
 import com.idigiwave.cbs.service.CbsService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -55,24 +56,7 @@ public class CbsServiceImpl implements CbsService {
             throw new CbsDuplicateResourceException("PAN number already registered in CBS");
         }
 
-        CbsCustomer customer = CbsCustomer.builder()
-                .customerId(idGenerator.generateCustomerId())
-                .firstName(request.getFirstName())
-                .lastName(request.getLastName())
-                .email(request.getEmail())
-                .mobileNumber(request.getMobileNumber())
-                .aadhaarNumber(request.getAadhaarNumber())
-                .panNumber(request.getPanNumber())
-                .address(request.getAddress())
-                .city(request.getCity())
-                .state(request.getState())
-                .pincode(request.getPincode())
-                .branchCode(request.getBranchCode())
-                .bankCode(idGenerator.getBankCode())
-                .customerStatus("ACTIVE")
-                .build();
-
-        CbsCustomer saved = customerRepository.save(customer);
+        CbsCustomer saved = persistCustomerWithRetry(request);
         log.info("CBS: Customer created with customerId={}", saved.getCustomerId());
         return mapToCustomerResponse(saved);
     }
@@ -114,36 +98,12 @@ public class CbsServiceImpl implements CbsService {
         CbsCustomer customer = customerRepository.findByCustomerId(request.getCustomerId())
                 .orElseThrow(() -> new CbsResourceNotFoundException("Customer not found in CBS: " + request.getCustomerId()));
 
-        String accountNumber = idGenerator.generateAccountNumber();
-
-        CbsAccount account = CbsAccount.builder()
-                .accountNumber(accountNumber)
-                .accountType(request.getAccountType())
-                .accountStatus(CbsAccountStatus.INITIATED)
-                .productCode(request.getProductCode() != null ? request.getProductCode() : "CPSAVIUTAOO1")
-                .offerCode(request.getOfferCode() != null ? request.getOfferCode() : "OFFERSAVIUTAOO1")
-                .branchCode(request.getBranchCode())
-                .bankCode(idGenerator.getBankCode())
-                .currencyCode(request.getCurrencyCode() != null ? request.getCurrencyCode() : "INR")
-                .balance(BigDecimal.ZERO)
-                .modeOfOperation(request.getModeOfOperation() != null ? request.getModeOfOperation() : "SINGLE")
-                .accountName(request.getAccountName() != null ? request.getAccountName() : customer.getFirstName() + " " + customer.getLastName())
-                .interestRate(new BigDecimal("3.5"))
-                .interestType("CREDIT")
-                .debitCardIssued(false)
-                .netBankingEnabled(false)
-                .mobileBankingEnabled(false)
-                .chequeBookIssued(false)
-                .effectiveDate(LocalDate.now())
-                .customer(customer)
-                .build();
-
-        CbsAccount saved = accountRepository.save(account);
+        CbsAccount saved = persistAccountWithRetry(request, customer);
 
         // Automatically seed default transaction limits
-        seedDefaultTransactionLimits(accountNumber);
+        seedDefaultTransactionLimits(saved.getAccountNumber());
 
-        log.info("CBS: Account opened with accountNumber={}", accountNumber);
+        log.info("CBS: Account opened with accountNumber={}", saved.getAccountNumber());
         return mapToAccountResponse(saved);
     }
 
@@ -205,8 +165,7 @@ public class CbsServiceImpl implements CbsService {
                 .middleName(request.getMiddleName())
                 .lastName(request.getLastName())
                 .gender(request.getGender())
-                .dateOfBirth(LocalDate.parse(request.getDateOfBirth(),
-                        DateTimeFormatter.ofPattern("dd-MMM-yyyy")))
+                .dateOfBirth(parseFlexibleDate(request.getDateOfBirth()))
                 .relationship(request.getRelationship())
                 .sharePercentage(request.getSharePercentage())
                 .mobileNumber(request.getMobileNumber())
@@ -315,6 +274,93 @@ public class CbsServiceImpl implements CbsService {
 
     private String maskCardNumber(String card) {
         return card.substring(0, 4) + "-XXXX-XXXX-" + card.substring(12);
+    }
+
+    private CbsCustomer persistCustomerWithRetry(CbsCreateCustomerRequest request) {
+        final int maxAttempts = 5;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            CbsCustomer customer = CbsCustomer.builder()
+                    .customerId(idGenerator.generateCustomerId())
+                    .firstName(request.getFirstName())
+                    .lastName(request.getLastName())
+                    .email(request.getEmail())
+                    .mobileNumber(request.getMobileNumber())
+                    .aadhaarNumber(request.getAadhaarNumber())
+                    .panNumber(request.getPanNumber())
+                    .address(request.getAddress())
+                    .city(request.getCity())
+                    .state(request.getState())
+                    .pincode(request.getPincode())
+                    .branchCode(request.getBranchCode())
+                    .bankCode(idGenerator.getBankCode())
+                    .customerStatus("ACTIVE")
+                    .build();
+            try {
+                return customerRepository.save(customer);
+            } catch (DataIntegrityViolationException ex) {
+                if (!isIdCollision(ex, "customer_id")) {
+                    throw ex;
+                }
+                log.warn("CBS: customer ID collision detected on attempt {}", attempt);
+            }
+        }
+
+        throw new CbsDuplicateResourceException("Unable to generate unique CBS customer ID. Please retry.");
+    }
+
+    private CbsAccount persistAccountWithRetry(CbsOpenAccountRequest request, CbsCustomer customer) {
+        final int maxAttempts = 5;
+
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            String accountNumber = idGenerator.generateAccountNumber();
+            CbsAccount account = CbsAccount.builder()
+                    .accountNumber(accountNumber)
+                    .accountType(request.getAccountType())
+                    .accountStatus(CbsAccountStatus.INITIATED)
+                    .productCode(request.getProductCode() != null ? request.getProductCode() : "CPSAVIUTAOO1")
+                    .offerCode(request.getOfferCode() != null ? request.getOfferCode() : "OFFERSAVIUTAOO1")
+                    .branchCode(request.getBranchCode())
+                    .bankCode(idGenerator.getBankCode())
+                    .currencyCode(request.getCurrencyCode() != null ? request.getCurrencyCode() : "INR")
+                    .balance(BigDecimal.ZERO)
+                    .modeOfOperation(request.getModeOfOperation() != null ? request.getModeOfOperation() : "SINGLE")
+                    .accountName(request.getAccountName() != null ? request.getAccountName() : customer.getFirstName() + " " + customer.getLastName())
+                    .interestRate(new BigDecimal("3.5"))
+                    .interestType("CREDIT")
+                    .debitCardIssued(false)
+                    .netBankingEnabled(false)
+                    .mobileBankingEnabled(false)
+                    .chequeBookIssued(false)
+                    .effectiveDate(LocalDate.now())
+                    .customer(customer)
+                    .build();
+            try {
+                return accountRepository.save(account);
+            } catch (DataIntegrityViolationException ex) {
+                if (!isIdCollision(ex, "account_number")) {
+                    throw ex;
+                }
+                log.warn("CBS: account number collision detected on attempt {}", attempt);
+            }
+        }
+
+        throw new CbsDuplicateResourceException("Unable to generate unique CBS account number. Please retry.");
+    }
+
+    private boolean isIdCollision(DataIntegrityViolationException ex, String constraintField) {
+        String message = ex.getMostSpecificCause() != null ? ex.getMostSpecificCause().getMessage() : ex.getMessage();
+        return message != null && message.toLowerCase().contains(constraintField.toLowerCase());
+    }
+
+    private LocalDate parseFlexibleDate(String dateOfBirth) {
+        if (dateOfBirth == null || dateOfBirth.isBlank()) {
+            throw new IllegalArgumentException("Nominee dateOfBirth is required");
+        }
+        try { return LocalDate.parse(dateOfBirth); } catch (Exception ignored) {}
+        try { return LocalDate.parse(dateOfBirth, DateTimeFormatter.ofPattern("dd-MMM-yyyy")); } catch (Exception ignored) {}
+        try { return LocalDate.parse(dateOfBirth, DateTimeFormatter.ofPattern("d-MMM-yyyy")); } catch (Exception ignored) {}
+        try { return LocalDate.parse(dateOfBirth, DateTimeFormatter.ofPattern("dd/MM/yyyy")); } catch (Exception ignored) {}
+        throw new IllegalArgumentException("Invalid nominee date format: " + dateOfBirth);
     }
 
     private CbsCustomerResponse mapToCustomerResponse(CbsCustomer c) {

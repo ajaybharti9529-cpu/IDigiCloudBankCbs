@@ -3,7 +3,8 @@ package com.idigiwave.cbs.config;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Component;
 
-import java.util.concurrent.atomic.AtomicLong;
+import java.time.Instant;
+import java.util.concurrent.atomic.AtomicInteger;
 
 /**
  * Generates unique CBS IDs that mimic a real Core Banking System
@@ -22,15 +23,19 @@ public class CbsIdGenerator {
     @Value("${cbs.bank-code:AXB}")
     private String bankCode;
 
-    private final AtomicLong customerCounter = new AtomicLong(1000);
-    private final AtomicLong accountCounter = new AtomicLong(10000);
+    private final AtomicInteger customerCounter = new AtomicInteger(0);
+    private final AtomicInteger accountCounter = new AtomicInteger(0);
 
     public String generateCustomerId() {
-        return customerPrefix + customerCounter.getAndIncrement();
+        long nowBucket = Instant.now().toEpochMilli() % 100000000L;
+        int seq = customerCounter.updateAndGet(value -> (value + 1) % 10000);
+        return customerPrefix + String.format("%08d%04d", nowBucket, seq);
     }
 
     public String generateAccountNumber() {
-        return accountPrefix + accountCounter.getAndIncrement();
+        long nowBucket = Instant.now().toEpochMilli() % 100000000L;
+        int seq = accountCounter.updateAndGet(value -> (value + 1) % 10000);
+        return accountPrefix + String.format("%08d%04d", nowBucket, seq);
     }
 
     public String getBankCode() {
