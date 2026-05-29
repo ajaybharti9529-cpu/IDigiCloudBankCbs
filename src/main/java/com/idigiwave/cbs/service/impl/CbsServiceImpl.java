@@ -134,6 +134,10 @@ public class CbsServiceImpl implements CbsService {
     public CbsAccountResponse activateAccount(String accountNumber) {
         CbsAccount account = accountRepository.findByAccountNumber(accountNumber)
                 .orElseThrow(() -> new CbsResourceNotFoundException("Account not found: " + accountNumber));
+        if (account.getAccountStatus() == CbsAccountStatus.ACTIVE) {
+            log.info("CBS: Account {} already active, skipping re-activation", accountNumber);
+            return mapToAccountResponse(account);
+        }
         account.setAccountStatus(CbsAccountStatus.ACTIVE);
         account.setNetBankingEnabled(true);
         account.setMobileBankingEnabled(true);

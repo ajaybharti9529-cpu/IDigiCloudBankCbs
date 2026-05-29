@@ -48,6 +48,7 @@ public class CbsAccountController {
     }
 
     @PatchMapping("/{accountNumber}/activate")
+    @PostMapping("/{accountNumber}/activate")
     @Operation(summary = "Activate account after KYC verification")
     public ResponseEntity<CbsApiResponse<CbsAccountResponse>> activateAccount(
             @PathVariable String accountNumber) {
