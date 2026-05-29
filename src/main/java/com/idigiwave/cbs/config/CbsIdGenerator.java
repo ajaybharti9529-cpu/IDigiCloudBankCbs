@@ -11,8 +11,8 @@ import org.springframework.stereotype.Component;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * Generates unique CBS IDs that mimic a real Core Banking System.
- * Counters are seeded from the database on startup so restarts do not reuse IDs.
+ * Generates unique CBS IDs. Counters are synced from PostgreSQL before each ID
+ * so Render cold-starts do not reuse customer/account numbers already in the DB.
  */
 @Component
 @RequiredArgsConstructor
@@ -31,39 +31,25 @@ public class CbsIdGenerator {
     private final CbsCustomerRepository customerRepository;
     private final CbsAccountRepository accountRepository;
 
-    /** Next numeric suffix after prefix (e.g. prefix 10000005 + 1004 => 100000051004). */
     private final AtomicLong customerSequence = new AtomicLong(1000);
     private final AtomicLong accountSequence = new AtomicLong(10000);
 
     @PostConstruct
     void seedSequencesFromDatabase() {
-        long maxCustomerSuffix = customerRepository.findAll().stream()
-                .map(c -> c.getCustomerId())
-                .filter(id -> id != null && id.startsWith(customerPrefix) && id.length() > customerPrefix.length())
-                .mapToLong(id -> parseNumericSuffix(id.substring(customerPrefix.length())))
-                .max()
-                .orElse(999L);
-
-        long maxAccountSuffix = accountRepository.findAll().stream()
-                .map(a -> a.getAccountNumber())
-                .filter(id -> id != null && id.startsWith(accountPrefix) && id.length() > accountPrefix.length())
-                .mapToLong(id -> parseNumericSuffix(id.substring(accountPrefix.length())))
-                .max()
-                .orElse(9999L);
-
-        customerSequence.set(Math.max(maxCustomerSuffix + 1, 1000));
-        accountSequence.set(Math.max(maxAccountSuffix + 1, 10000));
-
-        log.info("CBS ID generator ready (v2). Next customer suffix={}, next account suffix={}",
+        syncCustomerSequenceFromDatabase();
+        syncAccountSequenceFromDatabase();
+        log.info("CBS ID generator ready (v3). Next customer suffix={}, next account suffix={}",
                 customerSequence.get(), accountSequence.get());
     }
 
     public String generateCustomerId() {
+        syncCustomerSequenceFromDatabase();
         long suffix = customerSequence.getAndIncrement();
         return customerPrefix + suffix;
     }
 
     public String generateAccountNumber() {
+        syncAccountSequenceFromDatabase();
         long suffix = accountSequence.getAndIncrement();
         return accountPrefix + suffix;
     }
@@ -72,11 +58,25 @@ public class CbsIdGenerator {
         return bankCode;
     }
 
-    private long parseNumericSuffix(String suffix) {
+    private void syncCustomerSequenceFromDatabase() {
         try {
-            return Long.parseLong(suffix.replaceAll("\\D", ""));
-        } catch (NumberFormatException ex) {
-            return 0L;
+            Long maxSuffix = customerRepository.findMaxCustomerSuffix(customerPrefix, customerPrefix.length());
+            if (maxSuffix != null) {
+                customerSequence.updateAndGet(current -> Math.max(current, Math.max(maxSuffix + 1, 1000)));
+            }
+        } catch (Exception ex) {
+            log.warn("Could not sync customer ID sequence from database: {}", ex.getMessage());
+        }
+    }
+
+    private void syncAccountSequenceFromDatabase() {
+        try {
+            Long maxSuffix = accountRepository.findMaxAccountSuffix(accountPrefix, accountPrefix.length());
+            if (maxSuffix != null) {
+                accountSequence.updateAndGet(current -> Math.max(current, Math.max(maxSuffix + 1, 10000)));
+            }
+        } catch (Exception ex) {
+            log.warn("Could not sync account ID sequence from database: {}", ex.getMessage());
         }
     }
 }
